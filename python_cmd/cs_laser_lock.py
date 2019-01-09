@@ -7,6 +7,8 @@ import os
 import zmq
 import datetime
 import sys
+import threading
+
 
 #N_STEPS = 800  # number of voltage steps per scan
 
@@ -16,7 +18,7 @@ ZEROV = 32768
 
 params_default = (1600,
 
-                  5000., 1000.,0.00,
+                  2500., 1000.,0.00,
                   ZEROV,
                   1,
                   800)
@@ -62,7 +64,7 @@ class zmq_pub_dict:
     def send(self, data_dict):
         timestamp = time.time()
         send_string = "%s %f %s" % (self.topic, timestamp, repr(data_dict))
-        print(send_string)
+        #print(send_string)
         self.pub_socket.send(send_string)
 
     def close(self):
@@ -70,14 +72,40 @@ class zmq_pub_dict:
 
     def publish_data(self,data):
         try:
-            err,corr = data
-            data_dict = {'Error (V)': err, 'Correction (V)': corr}
+            err,corr,msg = data
+            data_dict = {'Error (V)': err, 'Correction (V)': corr, 'Message': msg}
             dt = str(time.time())
             self.send(data_dict)
         except:
-            print('error')
+            print('error retrieving/parsing data')
 
 
+## Threading
+kbd_input = ''
+new_input = True
+
+def commandListener():
+    global kbd_input, new_input
+    kbd_input = raw_input()
+    new_input = True
+
+
+publish = False
+
+def publishOn():
+    cslock.ser.write(b'm')
+    global publish
+    publish = True
+    print("Publishing...")
+
+def publishOff():
+    cslock.ser.write(b'm')
+    global publish
+    publish = False
+    print("Publishing off")
+
+
+publisher = zmq_pub_dict(5553,'cs_laser')
 
 def ToVoltage(bits):
     return float(bits/6553.6)
@@ -147,6 +175,9 @@ class CsLock:
         self.params[0] = int(new_amp - new_amp % self.params[6])
         self.set_params()
 
+    def close(self):
+        self.ser.close()
+
 
 def print_params():
         """ Print the current parameters on the microcontroller. """
@@ -205,23 +236,68 @@ def decrease_offset():
     cslock.params[4] -= int(ToBits(0.002))
     cslock.set_params()
 
-def publish_data():
-    publisher = zmq_pub_dict(5553,'cs_laser')
-    cslock.ser.write(b'm')
-    try:
-        while True:
-            err,corr = cslock.get_data()
-            data = (err,corr)
-            publisher.publish_data(data)
-    except KeyboardInterrupt:
-        pass
-    cslock.ser.write(b'm')
-    publisher.close()
+# def publish_data():
+#     publisher = zmq_pub_dict(5553,'cs_laser')
+#     cslock.ser.write(b'm')
+#     local_accumulator = 0
+#     try:
+#         while True:
+#             err,corr = cslock.get_data()
+#             data = (err,corr)
+#             publisher.publish_data(data)
 
-def close():
-    #self.set_lock_state(0)
-    cslock.ser.close()
+#     except KeyboardInterrupt:
+#         pass
+#     cslock.ser.write(b'm')
+#     publisher.close()
+
+
+def quit():
+    print("Loop exited")
+    publishOff()
+    loop_running = False
+
+def start():
+    print("Loop starting")
+    publishOn()
+    loop_running = True
 
 if __name__ == '__main__':
     cslock = CsLock()
 
+
+loop_running = True
+local_accumulator = 0
+while(loop_running):
+    try:
+        if(publish):
+            try:
+                err,corr = cslock.get_data()
+                local_accumulator+=err
+                msg = 'ok'
+                if(np.abs(local_accumulator)>10000.0):
+                    msg = 'out of lock'
+                data = (err,corr,msg)
+                publisher.publish_data(data)
+            except:
+                pass
+
+        if(new_input):
+            try:
+                exec(kbd_input)
+            except:
+                print("Invalid input")
+            new_input = False
+            listener = threading.Thread(target=commandListener)
+            listener.start()
+
+    except(KeyboardInterrupt):
+        print("Loop exited")
+        cslock.ser.write(b'm')
+        loop_running = False
+
+    except:
+        pass
+
+publisher.close()
+cslock.close()
